@@ -1,0 +1,89 @@
+# Python 관련
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 가상환경
+venv/
+env/
+ENV/
+.venv/
+
+# 모델 파일들 (.pt 파일들)
+*.pt
+*.pth
+*.onnx
+*.tflite
+*.pb
+
+# 데이터셋 폴더들
+yolo_dataset/
+yolo_dataset_*/
+merged_datasets/
+datasets/
+data/
+images/
+labels/
+
+# 결과 및 분석 폴더들
+analysis_results*/
+evaluation_results*/
+training_results/
+results/
+output/
+outputs/
+
+# YOLOv8 실행 결과
+runs/
+
+# 로그 및 실험 추적
+wandb/
+mlruns/
+logs/
+*.log
+
+# 설정 파일들 (필요시 주석 해제)
+*.yaml
+*.yml
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE 설정
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS 생성 파일
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 환경 변수
+.env
+.env.local
+
+# 임시 파일
+*.tmp
+*.temp
+*~
+*.bak
