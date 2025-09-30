@@ -1,4 +1,4 @@
-# Fruit Detection - Crop Recognition Model Enhancement
+# Fruit Detection - Crop Detection Model Enhancement
 헤르마이 예찰 로봇의 작물 인식(Detection) 모델 성능 고도화 프로젝트
 
 ## 📋 Overview
