@@ -49,6 +49,7 @@ training_results/
 results/
 output/
 outputs/
+models/
 
 # YOLOv8 실행 결과
 runs/

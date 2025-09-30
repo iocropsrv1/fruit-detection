@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Crowdworks -> YOLO 변환 (과실별 분리 저장, data.yaml 스키마 강제)
-- 변환: COCO(JSON) → YOLO(txt)
-- 과실별 staging: images/all, labels/all 생성
-- 분할: 과실별 랜덤샘플링으로 0.8/0.1/0.1 (train/val/test) 분리
-- 분할 방법 : HoldOut 방법
-- 결과: <output_dir>/<fruit>/
-          images/{train,val,test}/
-          labels/{train,val,test}/
-          data.yaml
+Prepare YOLO Dataset from Crowdworks (COCO JSON → YOLO txt)
+- Converts COCO(JSON) labels to YOLO format
+- Organizes by fruit type into staging (images/all, labels/all)
+- Splits dataset using Hold-Out method: 80% train, 10% val, 10% test
+- Generates YOLO-compatible `data.yaml` for each fruit
+
+Output structure:
+  <output_dir>/<fruit>/
+      images/{train,val,test}/
+      labels/{train,val,test}/
+      data.yaml
 """
 
+import argparse
 import json
+import random
 import shutil
 from pathlib import Path
-import argparse
-import random
 from collections import defaultdict
 from sklearn.model_selection import train_test_split
 
-# ===== 클래스 정규화/통합 규칙 =====
+# Default class names
 TARGET_NAMES_DEFAULT = ['ripened', 'ripening', 'unripened']
 TARGET_NAME_MAP = {
     'ripened': 'ripened',
@@ -31,23 +34,31 @@ TARGET_NAME_MAP = {
     'un-ripened': 'unripened',
 }
 
+
 def normalize_class_name(name: str) -> str:
-    return TARGET_NAME_MAP.get(name.strip().lower().replace(' ', '').replace('\t', ''), name.strip().lower())
+    """Normalize class names with mapping rules."""
+    return TARGET_NAME_MAP.get(
+        name.strip().lower().replace(' ', '').replace('\t', ''),
+        name.strip().lower()
+    )
+
 
 def convert_bbox_coco_to_yolo(bbox, img_w, img_h):
+    """Convert COCO format bbox [x,y,w,h] → YOLO format [cx,cy,w,h]."""
     x, y, w, h = bbox
     cx = (x + w / 2) / img_w
     cy = (y + h / 2) / img_h
     return [cx, cy, w / img_w, h / img_h]
 
+
 def ensure_dirs_for_fruit(base: Path):
-    # staging
+    """Create directory structure for images/labels."""
     (base / 'images' / 'all').mkdir(parents=True, exist_ok=True)
     (base / 'labels' / 'all').mkdir(parents=True, exist_ok=True)
-    # final splits
     for split in ['train', 'val', 'test']:
         (base / 'images' / split).mkdir(parents=True, exist_ok=True)
         (base / 'labels' / split).mkdir(parents=True, exist_ok=True)
+
 
 def create_data_yaml(dataset_dir: Path,
                      yaml_path_override: str,
@@ -55,6 +66,7 @@ def create_data_yaml(dataset_dir: Path,
                      yaml_val_rel: str,
                      yaml_test_rel: str,
                      target_names):
+    """Write YOLO-style data.yaml file."""
     content = (
         f"path: {yaml_path_override}\n"
         f"train: {yaml_train_rel}\n"
@@ -63,20 +75,25 @@ def create_data_yaml(dataset_dir: Path,
         f"nc: {len(target_names)}\n"
         f"names: {target_names}\n"
     )
-    with open(dataset_dir / 'data.yaml', 'w', encoding='utf-8') as f:
+    yaml_path = dataset_dir / 'data.yaml'
+    with open(yaml_path, 'w', encoding='utf-8') as f:
         f.write(content)
-    print(f"[data.yaml] {dataset_dir/'data.yaml'}")
+    print(f"[data.yaml] written → {yaml_path}")
 
-# ===== 데이터 수집 =====
+
 def collect_items(input_root: Path):
     """
-    반환: items_by_fruit[fruit] = list of dict(
-        image_path, json_path, fruit, region, date, section, file_name
-    )
+    Collect dataset items.
+
+    Returns:
+        dict: items_by_fruit[fruit] = list of dicts(
+            image_path, json_path, fruit, region, date, section, file_name
+        )
     """
     items_by_fruit = defaultdict(list)
     images_root = input_root / 'images'
     labels_root = input_root / 'labels'
+
     if not images_root.exists() or not labels_root.exists():
         raise FileNotFoundError(f"images/labels not found under {input_root}")
 
@@ -112,19 +129,16 @@ def collect_items(input_root: Path):
                         })
     return items_by_fruit
 
-# ===== COCO -> YOLO (staging: all) =====
+
 def convert_items_to_staging_all(items, fruit_out_dir: Path, target_names, strict_drop_unknown=True):
     """
-    각 이미지에 대해 YOLO 라벨 생성하여
-    <fruit>/images/all, <fruit>/labels/all 에 저장
-    파일명: fruit_region_date_section_original.png(.txt)
+    Convert COCO → YOLO labels and store into staging (all).
+    Keeps empty label files if no boxes found (YOLO allows empty).
     """
     ensure_dirs_for_fruit(fruit_out_dir)
     class_map = {name: idx for idx, name in enumerate(target_names)}
     coco_cache = {}
-
-    kept = 0
-    dropped = 0
+    kept, dropped = 0, 0
 
     for info in items:
         img_path = info['image_path']
@@ -135,36 +149,34 @@ def convert_items_to_staging_all(items, fruit_out_dir: Path, target_names, stric
                 coco_cache[json_path] = json.load(f)
         coco = coco_cache[json_path]
 
-        # 인덱스
+        # Index COCO
         images_info = {img['id']: img for img in coco.get('images', [])}
         anns_by_image = defaultdict(list)
         for ann in coco.get('annotations', []):
             anns_by_image[ann['image_id']].append(ann)
 
-        cat_name_by_id = {}
-        for cat in coco.get('categories', []):
-            cat_name_by_id[cat['id']] = normalize_class_name(cat.get('name', ''))
+        cat_name_by_id = {
+            cat['id']: normalize_class_name(cat.get('name', ''))
+            for cat in coco.get('categories', [])
+        }
 
-        # 매칭
-        matched_img = None
-        matched_anns = []
+        matched_img, matched_anns = None, []
         for img_id, meta in images_info.items():
             if meta.get('file_name') == info['file_name']:
-                matched_img = meta
-                matched_anns = anns_by_image[img_id]
+                matched_img, matched_anns = meta, anns_by_image[img_id]
                 break
         if not matched_img:
-            print(f"[Warn] no ann for {info['file_name']}")
+            print(f"[Warn] no annotation for {info['file_name']}")
             continue
 
-        # 목적지 파일명(충돌 방지)
+        # Destination file names
         base_name = f"{info['fruit']}_{info['region']}_{info['date']}_{info['section']}_{info['file_name']}"
         dst_img = fruit_out_dir / 'images' / 'all' / base_name
         shutil.copy2(img_path, dst_img)
 
         dst_lbl = fruit_out_dir / 'labels' / 'all' / (dst_img.stem + '.txt')
 
-        # 라벨 작성
+        # Write YOLO label
         count_lines = 0
         with open(dst_lbl, 'w', encoding='utf-8') as lf:
             for ann in matched_anns:
@@ -173,8 +185,6 @@ def convert_items_to_staging_all(items, fruit_out_dir: Path, target_names, stric
                 cname = cat_name_by_id.get(ann['category_id'])
                 if cname not in class_map:
                     if strict_drop_unknown:
-                        continue
-                    else:
                         continue
                 cls_id = class_map[cname]
                 w, h = matched_img['width'], matched_img['height']
@@ -185,16 +195,14 @@ def convert_items_to_staging_all(items, fruit_out_dir: Path, target_names, stric
         if count_lines > 0:
             kept += 1
         else:
-            # 빈 라벨도 그대로 둠 (YOLO 허용). 카운트만 기록
             dropped += 1
 
-    print(f"[Staging] {fruit_out_dir.name}: kept(>=1 box)={kept}, empty_after_filter={dropped}")
+    print(f"[Staging] {fruit_out_dir.name}: kept(>=1 box)={kept}, empty={dropped}")
 
-# ===== 랜덤 분할: 0.8 / 0.1 / 0.1 =====
+
 def random_split_80_10_10_and_materialize(fruit_out_dir: Path, seed: int):
     """
-    staging(all)에 있는 파일 목록을 기준으로 랜덤 분할 후
-    train/val/test 디렉터리로 이미지/라벨을 복사.
+    Perform random 80/10/10 split and copy files to train/val/test.
     """
     rng = random.Random(seed)
 
@@ -205,10 +213,9 @@ def random_split_80_10_10_and_materialize(fruit_out_dir: Path, seed: int):
         print(f"[Split] {fruit_out_dir.name}: nothing in staging.")
         return
 
-    # 먼저 test 10% 분할
+    # Split
     names_rest, names_test = train_test_split(all_basenames, test_size=0.1, random_state=seed)
-    # 나머지에서 val 10% (전체 기준 → 나머지 대비 비율 = 0.1 / 0.9)
-    names_train, names_val = train_test_split(names_rest, test_size=(0.1/0.9), random_state=seed)
+    names_train, names_val = train_test_split(names_rest, test_size=(0.1 / 0.9), random_state=seed)
 
     print(f"[Split] {fruit_out_dir.name}: train={len(names_train)}, val={len(names_val)}, test={len(names_test)}")
 
@@ -224,51 +231,47 @@ def random_split_80_10_10_and_materialize(fruit_out_dir: Path, seed: int):
                 shutil.copy2(src_lbl, dst_lbl)
 
     copy_for_split('train', names_train)
-    copy_for_split('val',   names_val)
-    copy_for_split('test',  names_test)
+    copy_for_split('val', names_val)
+    copy_for_split('test', names_test)
 
-# ===== 메인 =====
+
 def main():
-    ap = argparse.ArgumentParser(description="COCO->YOLO per-fruit, then random 0.8/0.1/0.1 split")
-    ap.add_argument('--input_dir', required=True, help='Input root (images/, labels/ under it)')
-    ap.add_argument('--output_dir', required=True, help='Output root (per fruit subdir will be created)')
-    ap.add_argument('--seed', type=int, default=42)
+    parser = argparse.ArgumentParser(description="Convert Crowdworks COCO dataset → YOLO with Holdout split")
+    parser.add_argument('--input_dir', required=True, help='Input root (with images/, labels/)')
+    parser.add_argument('--output_dir', required=True, help='Output root (per fruit subdir will be created)')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--yaml_path_override', default='/data/ioCrops/berry/dataset/fruit/train_v1.0')
+    parser.add_argument('--yaml_train_rel', default='images/train/')
+    parser.add_argument('--yaml_val_rel', default='images/test/')  # original request
+    parser.add_argument('--yaml_test_rel', default='images/test/')
+    parser.add_argument('--yaml_names', default='ripened,ripening,unripened')
+    args = parser.parse_args()
 
-    # data.yaml 스키마(기본은 요청값 유지: val를 test와 동일 경로로 표기)
-    ap.add_argument('--yaml_path_override', default='/data/ioCrops/berry/dataset/fruit/train_v1.0')
-    ap.add_argument('--yaml_train_rel', default='images/train/')
-    ap.add_argument('--yaml_val_rel', default='images/test/')   # ← 원 요청 반영
-    ap.add_argument('--yaml_test_rel', default='images/test/')
-    ap.add_argument('--yaml_names', default='ripened,ripening,unripened')
-
-    args = ap.parse_args()
     random.seed(args.seed)
 
     input_root = Path(args.input_dir)
     output_root = Path(args.output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    target_names = [s.strip() for s in args.yaml_names.split(',') if s.strip()]
-    if not target_names:
-        target_names = TARGET_NAMES_DEFAULT
+    target_names = [s.strip() for s in args.yaml_names.split(',') if s.strip()] or TARGET_NAMES_DEFAULT
 
-    # 1) 아이템 수집
+    # Collect
     items_by_fruit = collect_items(input_root)
 
-    # 2) 과실별 변환 → staging(all)
+    # Convert
     for fruit, items in sorted(items_by_fruit.items()):
         fruit_out = output_root / fruit
         print(f"\n=== Convert to YOLO (staging) | fruit={fruit}, N={len(items)} ===")
         convert_items_to_staging_all(items, fruit_out, target_names, strict_drop_unknown=True)
 
-    # 3) 과실별 랜덤 분할(0.8/0.1/0.1) → train/val/test 디렉터리 생성/복사
+    # Split & materialize
     for fruit in sorted(items_by_fruit.keys()):
         fruit_out = output_root / fruit
         print(f"\n=== Random split 0.8/0.1/0.1 | fruit={fruit} ===")
         ensure_dirs_for_fruit(fruit_out)
         random_split_80_10_10_and_materialize(fruit_out, seed=args.seed)
 
-        # 4) data.yaml 생성
+        # Write data.yaml
         create_data_yaml(
             dataset_dir=fruit_out,
             yaml_path_override=args.yaml_path_override,
@@ -279,6 +282,7 @@ def main():
         )
 
     print("\n=== Done ===")
+
 
 if __name__ == "__main__":
     main()

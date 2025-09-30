@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 두 개의 데이터셋을 합쳐서 새로운 YOLO 데이터셋 생성
-- 데이터셋 1: 이미 분할된 YOLO 형식 (/data/ioCrops/<과실명>/dataset/train_v1.1_fruit/)
-- 데이터셋 2: COCO JSON 형식 (/home/cat123/crowdworks_20250610/detection/)
+- 데이터셋 1: 이미 분할된 YOLO 형식 (과실별 경로 상이)
+    * pepper : /data/ioCrops/pepper/dataset/train_v1.1_fruit/{images,labels}/{train,valid,test}/*.png|*.txt
+    * tomato : /data/ioCrops/tomato/dataset/train_v1.3_fruit/{images,labels}/{train,valid,test}/*.png|*.txt
+    * berry  : /data/ioCrops/berry/dataset/fruit/train_v1.0/{images,labels}/{train,test}/*.png|*.txt
+- 데이터셋 2: COCO JSON 형식 (/home/cat123/crowdworks_20250610/detection/ 또는 유사 구조)
 - 결과: 과실별로 합쳐진 새로운 데이터셋 (8:1:1 분할)
 """
 
@@ -27,7 +31,10 @@ TARGET_NAME_MAP = {
 }
 
 def normalize_class_name(name: str) -> str:
-    return TARGET_NAME_MAP.get(name.strip().lower().replace(' ', '').replace('\t', ''), name.strip().lower())
+    return TARGET_NAME_MAP.get(
+        name.strip().lower().replace(' ', '').replace('\t', ''),
+        name.strip().lower()
+    )
 
 def convert_bbox_coco_to_yolo(bbox, img_w, img_h):
     x, y, w, h = bbox
@@ -69,6 +76,9 @@ def collect_dataset2_items(input_root: Path):
     반환: items_by_fruit[fruit] = list of dict(
         image_path, json_path, fruit, region, date, section, file_name
     )
+    기대 구조:
+      images/<fruit>/<region>/<date>/<section>/*.png
+      labels/<fruit>/<region>/<date>/<section>.json
     """
     items_by_fruit = defaultdict(list)
     images_root = input_root / 'images'
@@ -110,43 +120,55 @@ def collect_dataset2_items(input_root: Path):
                         })
     return items_by_fruit
 
-# ===== 데이터셋 1 수집 (이미 분할된 YOLO) =====
+# ===== 데이터셋 1 수집 (이미 분할된 YOLO, 과실별 경로 상이) =====
 def collect_dataset1_items(dataset1_root: Path):
     """
-    데이터셋 1에서 아이템 수집 (이미 train/valid/test로 분할됨)
+    Dataset1에서 아이템 수집 (이미 train/valid/test 등으로 분할됨)
+    과실별 실제 경로 차이를 반영.
     반환: items_by_fruit[fruit][split] = list of dict(image_path, label_path, file_name)
     """
     items_by_fruit = defaultdict(lambda: defaultdict(list))
     
-    if not dataset1_root.exists():
-        print(f"[Warn] Dataset1 root not found: {dataset1_root}")
-        return items_by_fruit
-    
-    # 과실별로 순회
-    for fruit in ['pepper', 'tomato', 'berry']:
-        fruit_path = dataset1_root / fruit / 'dataset' / 'train_v1.1_fruit'
+    dataset1_config = {
+        # pepper: train_v1.1_fruit, splits: train/valid/test
+        "pepper": {
+            "base": dataset1_root / "pepper" / "dataset" / "train_v1.1_fruit",
+            "splits": ["train", "valid", "test"],
+        },
+        # tomato: train_v1.3_fruit, splits: train/valid/test
+        "tomato": {
+            "base": dataset1_root / "tomato" / "dataset" / "train_v1.3_fruit",
+            "splits": ["train", "valid", "test"],
+        },
+        # berry: fruit/train_v1.0, splits: train/test (valid 없음)
+        "berry": {
+            "base": dataset1_root / "berry" / "dataset" / "fruit" / "train_v1.0",
+            "splits": ["train", "test"],
+        },
+    }
+
+    for fruit, cfg in dataset1_config.items():
+        fruit_path = cfg["base"]
         if not fruit_path.exists():
             print(f"[Warn] Dataset1 fruit path not found: {fruit_path}")
             continue
-            
-        # train, valid, test별로 순회
-        for split in ['train', 'valid', 'test']:
-            images_dir = fruit_path / 'images' / split
-            labels_dir = fruit_path / 'labels' / split
-            
+
+        for split in cfg["splits"]:
+            images_dir = fruit_path / "images" / split
+            labels_dir = fruit_path / "labels" / split
             if not images_dir.exists() or not labels_dir.exists():
-                print(f"[Warn] Dataset1 split not found: {images_dir} or {labels_dir}")
+                print(f"[Warn] {fruit} split not found: {images_dir} or {labels_dir}")
                 continue
-                
+
             for img_path in images_dir.glob("*.png"):
                 label_path = labels_dir / f"{img_path.stem}.txt"
                 if label_path.exists():
                     items_by_fruit[fruit][split].append({
-                        'image_path': img_path,
-                        'label_path': label_path,
-                        'file_name': img_path.name
+                        "image_path": img_path,
+                        "label_path": label_path,
+                        "file_name": img_path.name
                     })
-    
+
     return items_by_fruit
 
 # ===== COCO -> YOLO (데이터셋 2) =====
@@ -154,7 +176,7 @@ def convert_dataset2_to_staging_all(items, fruit_out_dir: Path, target_names, st
     """
     데이터셋 2의 각 이미지에 대해 YOLO 라벨 생성하여
     <fruit>/images/all, <fruit>/labels/all 에 저장
-    파일명: ds2_fruit_region_date_section_original.png(.txt)
+    파일명: ds2_<fruit>_<region>_<date>_<section>_<original.png>
     """
     ensure_dirs_for_fruit(fruit_out_dir)
     class_map = {name: idx for idx, name in enumerate(target_names)}
@@ -194,7 +216,7 @@ def convert_dataset2_to_staging_all(items, fruit_out_dir: Path, target_names, st
             print(f"[Warn] no ann for {info['file_name']}")
             continue
 
-        # 목적지 파일명(충돌 방지 - 데이터셋 2 접두사 추가)
+        # 목적지 파일명(충돌 방지 - Dataset2 접두사 추가)
         base_name = f"ds2_{info['fruit']}_{info['region']}_{info['date']}_{info['section']}_{info['file_name']}"
         dst_img = fruit_out_dir / 'images' / 'all' / base_name
         shutil.copy2(img_path, dst_img)
@@ -237,17 +259,17 @@ def copy_dataset1_to_staging_all(items_by_split, fruit_out_dir: Path):
     total_copied = 0
     for split, items in items_by_split.items():
         for item in items:
-            # 충돌 방지를 위해 데이터셋 1 접두사 및 split 정보 추가
+            # 접두사 및 split 정보 추가 (충돌 방지)
             base_name = f"ds1_{split}_{item['file_name']}"
-            
+
             # 이미지 복사
             dst_img = fruit_out_dir / 'images' / 'all' / base_name
             shutil.copy2(item['image_path'], dst_img)
-            
+
             # 라벨 복사
             dst_lbl = fruit_out_dir / 'labels' / 'all' / (dst_img.stem + '.txt')
             shutil.copy2(item['label_path'], dst_lbl)
-            
+
             total_copied += 1
     
     print(f"[Dataset1 Staging] {fruit_out_dir.name}: copied {total_copied} files")
@@ -292,18 +314,18 @@ def random_split_80_10_10_and_materialize(fruit_out_dir: Path, seed: int):
 # ===== 메인 =====
 def main():
     ap = argparse.ArgumentParser(description="Merge two datasets and create new YOLO dataset")
-    ap.add_argument('--dataset1_root', default='/data/ioCrops', 
-                    help='Dataset1 root (contains <fruit>/dataset/train_v1.1_fruit/)')
-    ap.add_argument('--dataset2_root', default='/home/cat123/crowdworks_20250610/detection', 
+    ap.add_argument('--dataset1_root', default='/data/ioCrops',
+                    help='Dataset1 root (contains pepper/tomato/berry with their respective versions)')
+    ap.add_argument('--dataset2_root', default='/home/cat123//crowdworks_20250610/detection/',
                     help='Dataset2 root (COCO format, contains images/, labels/)')
-    ap.add_argument('--output_dir', default='/home/cat123/yolov8-fruit_detection/yolo_dataset_merged_new',
+    ap.add_argument('--output_dir', default='/home/cat123/yolov8-fruit_detection/yolo_dataset_v1.2',
                     help='Output root (per fruit subdir will be created)')
     ap.add_argument('--seed', type=int, default=42)
 
     # data.yaml 스키마
-    ap.add_argument('--yaml_path_override', default='/home/cat123/yolov8-fruit_detection/yolo_dataset_merged_new')
+    ap.add_argument('--yaml_path_override', default='/home/cat123/yolov8-fruit_detection/yolo_dataset_v1.2')
     ap.add_argument('--yaml_train_rel', default='images/train/')
-    ap.add_argument('--yaml_val_rel', default='images/val/')
+    ap.add_argument('--yaml_val_rel', default='images/valid/')
     ap.add_argument('--yaml_test_rel', default='images/test/')
     ap.add_argument('--yaml_names', default='ripened,ripening,unripened')
 
@@ -339,15 +361,19 @@ def main():
         fruit_out = output_root / fruit
         
         # 데이터셋 2 변환 → staging(all)
-        if fruit in dataset2_items:
+        if fruit in dataset2_items and len(dataset2_items[fruit]) > 0:
             print(f"데이터셋 2 변환 중... ({len(dataset2_items[fruit])} items)")
             convert_dataset2_to_staging_all(dataset2_items[fruit], fruit_out, target_names)
-        
+        else:
+            print(f"[Info] Dataset2 items not found for {fruit} (skip DS2)")
+
         # 데이터셋 1 복사 → staging(all)
-        if fruit in dataset1_items:
+        if fruit in dataset1_items and any(len(v) > 0 for v in dataset1_items[fruit].values()):
             total_ds1 = sum(len(items) for items in dataset1_items[fruit].values())
             print(f"데이터셋 1 복사 중... ({total_ds1} items)")
             copy_dataset1_to_staging_all(dataset1_items[fruit], fruit_out)
+        else:
+            print(f"[Info] Dataset1 items not found for {fruit} (skip DS1)")
         
         # 랜덤 분할(8:1:1) → train/val/test 디렉터리 생성/복사
         print(f"랜덤 분할 (8:1:1) 중...")
@@ -372,8 +398,8 @@ def main():
         fruit_out = output_root / fruit
         if fruit_out.exists():
             train_count = len(list((fruit_out / 'images' / 'train').glob('*.png')))
-            val_count = len(list((fruit_out / 'images' / 'val').glob('*.png')))
-            test_count = len(list((fruit_out / 'images' / 'test').glob('*.png')))
+            val_count   = len(list((fruit_out / 'images' / 'val').glob('*.png')))
+            test_count  = len(list((fruit_out / 'images' / 'test').glob('*.png')))
             total_count = train_count + val_count + test_count
             print(f"{fruit}: train={train_count}, val={val_count}, test={test_count}, total={total_count}")
 
